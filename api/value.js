@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   `https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/basicprofile?address=${encodeURIComponent(address)}`,
   {
     headers: {
-      apikey: process.env.ATTOM_API_KEY,
+      APIKey: process.env.ATTOM_API_KEY,
     },
   }
 );
