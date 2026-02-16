@@ -3,15 +3,14 @@ export default async function handler(req, res) {
 
   try {
     const response = await fetch(
-      `https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?address=${encodeURIComponent(address)}`,
-      {
-        method: "GET",
-        headers: {
-          apikey: process.env.ATTOM_API_KEY,
-          Accept: "application/json"
-        }
-      }
-    );
+  `https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/basicprofile?address=${encodeURIComponent(address)}`,
+  {
+    headers: {
+      apikey: process.env.ATTOM_API_KEY,
+    },
+  }
+);
+
 
     const data = await response.json();
     res.status(response.status).json(data);
