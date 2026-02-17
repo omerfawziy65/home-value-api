@@ -1,100 +1,119 @@
 export default async function handler(req, res) {
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const apikey = process.env.ATTOM_API_KEY;
+  if (!apikey) {
+    return res.status(500).json({ error: 'Missing ATTOM_API_KEY' });
+  }
+
+  const address = (req.query.address || '').toString().trim();
+  if (!address) {
+    return res.status(400).json({ error: 'address query param is required' });
+  }
+
+  const tried = [];
+
   try {
-    const { address } = req.query
+    const propertyUrl =
+      `https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail?address=` +
+      encodeURIComponent(address);
 
-    if (!address) {
-      return res.status(400).json({ error: "address query param is required" })
-    }
+    const propertyResp = await fetch(propertyUrl, {
+      headers: { apikey, accept: 'application/json' },
+    });
 
-    const API_KEY = process.env.ATTOM_API_KEY
-    if (!API_KEY) {
-      return res.status(500).json({ error: "ATTOM_API_KEY is missing in env" })
-    }
+    const propertyData = await propertyResp.json().catch(() => ({}));
 
-    const headers = { apikey: API_KEY }
+    const property = propertyData?.property?.[0] ?? null;
+    const attomId = property?.identifier?.attomId ?? null;
 
-    // 1) Önce property/detail ile attomId bul
-    const propUrl = `https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail?address=${encodeURIComponent(
-      address
-    )}`
+    const assessmentValue =
+      property?.assessment?.market?.mktTtlValue ??
+      property?.assessment?.tax?.assdTtlValue ??
+      null;
 
-    const propResp = await fetch(propUrl, { headers })
-    const propData = await propResp.json()
+    tried.push({
+      step: 'property/detail',
+      ok: propertyResp.ok,
+      code: propertyResp.status,
+      attomId,
+      assessmentValue,
+    });
 
-    const attomId =
-      propData?.property?.[0]?.identifier?.attomId ??
-      propData?.property?.[0]?.identifier?.Id ??
-      propData?.status?.attomId ??
-      null
-
-    // Helper: değeri farklı olası alanlardan çek
-    const pickMarketValue = (data) => {
-      // AVM bazen avm.* içinde döner (planına göre değişebilir)
-      const avmValue =
-        data?.property?.[0]?.avm?.amount?.value ??
-        data?.property?.[0]?.avm?.value ??
-        data?.property?.[0]?.avm?.amount ??
-        null
-
-      // Bazı yanıtlarda assessment.market içinde olabilir
-      const assessmentValue =
-        data?.property?.[0]?.assessment?.market?.mktTtlValue ?? null
-
-      return avmValue ?? assessmentValue
-    }
-
-    // 2) attomId bulduysak AVM’yi attomId ile dene
-    let avmData = null
-    let marketValue = null
-    let avmTried = null
+    let avmValue = null;
+    let avmStatus = null;
 
     if (attomId) {
-      const avmByIdUrl = `https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?attomId=${encodeURIComponent(
-        attomId
-      )}`
+      const avmByIdUrl =
+        `https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?attomId=` +
+        encodeURIComponent(attomId);
 
-      const avmResp = await fetch(avmByIdUrl, { headers })
-      avmData = await avmResp.json()
-      avmTried = { mode: "attomId", url: avmByIdUrl, http: avmResp.status }
+      const avmByIdResp = await fetch(avmByIdUrl, {
+        headers: { apikey, accept: 'application/json' },
+      });
+      const avmByIdData = await avmByIdResp.json().catch(() => ({}));
 
-      marketValue = pickMarketValue(avmData)
+      avmStatus = avmByIdData?.status || { code: avmByIdResp.status };
+      avmValue =
+        avmByIdData?.property?.[0]?.avm?.amount?.value ??
+        avmByIdData?.property?.[0]?.avm?.amount ??
+        null;
+
+      tried.push({
+        step: 'avm/detail?attomId',
+        ok: avmByIdResp.ok,
+        code: avmByIdResp.status,
+        avmValue,
+      });
     }
 
-    // 3) attomId ile AVM boş döndüyse -> address ile AVM’yi dene (fallback)
-    if (marketValue == null) {
-      const avmByAddressUrl = `https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?address=${encodeURIComponent(
-        address
-      )}`
+    if (avmValue == null) {
+      const avmByAddressUrl =
+        `https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?address=` +
+        encodeURIComponent(address);
 
-      const avmResp2 = await fetch(avmByAddressUrl, { headers })
-      const avmData2 = await avmResp2.json()
+      const avmByAddressResp = await fetch(avmByAddressUrl, {
+        headers: { apikey, accept: 'application/json' },
+      });
+      const avmByAddressData = await avmByAddressResp.json().catch(() => ({}));
 
-      // Eğer ilk avmData yoksa bunu sakla, varsa "fallback" olarak ekle
-      if (!avmData) avmData = avmData2
-
-      avmTried = {
-        ...(avmTried || {}),
-        fallback: { mode: "address", url: avmByAddressUrl, http: avmResp2.status },
+      if (!avmStatus) {
+        avmStatus = avmByAddressData?.status || { code: avmByAddressResp.status };
       }
 
-      marketValue = pickMarketValue(avmData2)
+      avmValue =
+        avmByAddressData?.property?.[0]?.avm?.amount?.value ??
+        avmByAddressData?.property?.[0]?.avm?.amount ??
+        null;
+
+      tried.push({
+        step: 'avm/detail?address',
+        ok: avmByAddressResp.ok,
+        code: avmByAddressResp.status,
+        avmValue,
+      });
     }
 
-    // Sonuç
+    const value = avmValue ?? assessmentValue ?? null;
+    const source = avmValue != null ? 'avm' : assessmentValue != null ? 'assessment' : null;
+
     return res.status(200).json({
       address,
       attomId,
-      marketValue,
+      value,
+      marketValue: value,
+      source,
       status: {
-        property: propData?.status ?? null,
-        avm: avmData?.status ?? null,
+        avm: avmStatus,
       },
-      tried: avmTried,
-    })
+      tried,
+    });
   } catch (err) {
     return res.status(500).json({
-      error: "server_error",
-      message: err?.message || String(err),
-    })
+      error: 'Internal error while fetching ATTOM data',
+      details: err?.message || 'unknown error',
+    });
   }
 }
