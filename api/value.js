@@ -2,7 +2,7 @@ export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "GET") {
@@ -10,15 +10,13 @@ export default async function handler(req, res) {
   }
 
   const address = (req.query.address || "").toString().trim();
-  const provider = (req.query.provider || "auto").toString().toLowerCase(); // attom | rentcast | auto
+  const provider = "attom";
 
   if (!address) {
     return res.status(400).json({ error: "address query param is required" });
   }
 
   const ATTOM_API_KEY = process.env.ATTOM_API_KEY;
-  const RENTCAST_API_KEY = process.env.RENTCAST_API_KEY;
-
   const tried = [];
 
   const toNumber = (v) => {
@@ -47,7 +45,6 @@ export default async function handler(req, res) {
     const headers = { apikey: ATTOM_API_KEY, accept: "application/json" };
 
     try {
-      // 1) property/detail
       const propertyUrl =
         "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail?address=" +
         encodeURIComponent(addr);
@@ -71,7 +68,6 @@ export default async function handler(req, res) {
       let avmValue = null;
       let avmStatus = null;
 
-      // 2) avm by attomId
       if (attomId) {
         const avmByIdUrl =
           "https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?attomId=" +
@@ -92,7 +88,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // 3) avm by address fallback
       if (avmValue == null) {
         const avmByAddressUrl =
           "https://api.gateway.attomdata.com/propertyapi/v1.0.0/avm/detail?address=" +
@@ -113,13 +108,12 @@ export default async function handler(req, res) {
         });
       }
 
-      const finalAttomValue = avmValue ?? assessmentValue ?? null;
-      const attomSource =
-        avmValue != null ? "avm" : assessmentValue != null ? "assessment" : null;
+      const finalValue = avmValue ?? assessmentValue ?? null;
+      const source = avmValue != null ? "avm" : assessmentValue != null ? "assessment" : null;
 
       return {
-        value: finalAttomValue,
-        source: attomSource,
+        value: finalValue,
+        source,
         attomId,
         status: { avm: avmStatus },
       };
@@ -129,106 +123,24 @@ export default async function handler(req, res) {
     }
   }
 
-  async function getRentcastValue(addr) {
-    if (!RENTCAST_API_KEY) {
-      tried.push({ step: "rentcast:missing-key", ok: false });
-      return { value: null, status: null };
-    }
-
-    // Endpoint farklıysa sadece bu URL'i değiştir.
-    const url =
-      "https://api.rentcast.io/v1/avm/value?address=" + encodeURIComponent(addr);
-
-    try {
-      const { resp, data } = await fetchJson(url, {
-        headers: {
-          "X-Api-Key": RENTCAST_API_KEY,
-          accept: "application/json",
-        },
-      });
-
-      // Farklı response şemalarına tolerans
-      const value =
-        toNumber(data?.price) ??
-        toNumber(data?.value) ??
-        toNumber(data?.avm?.value) ??
-        toNumber(data?.avm) ??
-        null;
-
-      tried.push({
-        step: "rentcast:avm/value",
-        ok: resp.ok,
-        code: resp.status,
-        rentcastValue: value,
-      });
-
-      return {
-        value,
-        status: { code: resp.status, ok: resp.ok },
-      };
-    } catch (e) {
-      tried.push({ step: "rentcast:error", ok: false, message: e?.message || "unknown" });
-      return { value: null, status: null };
-    }
-  }
-
   try {
-    let attom = { value: null, source: null, attomId: null, status: null };
-    let rentcast = { value: null, status: null };
-
-    if (provider === "attom") {
-      attom = await getAttomValue(address);
-    } else if (provider === "rentcast") {
-      rentcast = await getRentcastValue(address);
-    } else {
-      // auto: ikisini de çağır
-      [attom, rentcast] = await Promise.all([getAttomValue(address), getRentcastValue(address)]);
-    }
-
-    // Auto fallback: ATTOM yoksa RentCast'i ana value yap
-    const resolvedValue =
-      provider === "attom"
-        ? attom.value
-        : provider === "rentcast"
-        ? rentcast.value
-        : attom.value ?? rentcast.value ?? null;
-
-    const resolvedProvider =
-      provider === "attom"
-        ? "attom"
-        : provider === "rentcast"
-        ? "rentcast"
-        : attom.value != null
-        ? "attom"
-        : rentcast.value != null
-        ? "rentcast"
-        : null;
+    const attom = await getAttomValue(address);
 
     return res.status(200).json({
       address,
-      provider, // requested
-      resolvedProvider, // chosen by fallback
-      value: resolvedValue,
-      marketValue: resolvedValue,
-
-      // UI'da ikisini de göstermek için:
-      values: {
-        attom: attom.value,
-        rentcast: rentcast.value,
-      },
-
-      // ATTOM detayları
+      provider,
+      resolvedProvider: "attom",
+      value: attom.value,
+      marketValue: attom.value,
+      values: { attom: attom.value },
       attomId: attom.attomId ?? null,
       attomSource: attom.source ?? null,
-      status: {
-        attom: attom.status ?? null,
-        rentcast: rentcast.status ?? null,
-      },
+      status: { attom: attom.status ?? null },
       tried,
     });
   } catch (err) {
     return res.status(500).json({
-      error: "Internal error while fetching values",
+      error: "Internal error while fetching ATTOM value",
       details: err?.message || "unknown error",
     });
   }
